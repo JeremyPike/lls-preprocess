@@ -61,7 +61,7 @@ public class LLSPreprocess<T extends RealType<T>> implements Command {
 	@Parameter(label = "Define the rotation angle (degrees): ", persist = false, min = "0.", max = "90.")
 	private double angleDegrees = 32.8;
 
-	@Parameter(label = "Maximum number of itearions foe deconvolution: ", persist = false, min = "1", max = "200")
+	@Parameter(label = "Maximum number of iterations for deconvolution: ", persist = false, min = "1", max = "200")
 	private int maxItDecon = 1;
 
 	@Parameter(type = ItemIO.OUTPUT)
@@ -75,38 +75,38 @@ public class LLSPreprocess<T extends RealType<T>> implements Command {
 		final AffineTransform3D affineShear = new AffineTransform3D();
 		affineShear.set(new double[][] { { 1., 0., shearPix, 0. }, { 0., 1., 0., 0. }, { 0., 0., 1., 0. },
 				{ 0., 0., 0., 1. } });
-		
+
 		// apply affine transform and retrieve bounded view
 		IntervalView<T> deskewed = affineBoundingBox(image, affineShear, new NLinearInterpolatorFactory<>());
-		
-		
+
 		try {
 			// open the psf stack
 			Img<T> psf = (Img<T>) ioService.open(psfFile.getAbsolutePath());
-			
+
 			// convert both deskewed View and psf to Float
 			// this seems to be needed to get the deconvolution op to work????
 			Img<FloatType> deskewedFloat = opService.convert().float32(deskewed);
 			Img<FloatType> psfFloat = opService.convert().float32(psf);
-			
+
 			// deconvolve with standard RL algorithm
 			RandomAccessibleInterval<FloatType> deconvolved = (RandomAccessibleInterval<FloatType>) opService
 					.run("richardsonLucy", deskewedFloat, psfFloat, maxItDecon);
-			
+
 			// convert rotation angle to radians
 			final double angleRad = Math.toRadians(angleDegrees);
-		
+
 			// create affine transform for rotation
 			final AffineTransform3D affineRot = new AffineTransform3D();
-			affineRot.set(new double[][] { { angleRad, 0., 0.5, 0. }, { 0., 1., 0., 0. }, { -0.5, 0., angleRad, 0. },
-					{ 0., 0., 0., 1. } });
+			affineRot.set(new double[][] { { Math.cos(angleRad), 0., Math.sin(angleRad), 0. }, { 0., 1., 0., 0. },
+					{ -1 * Math.sin(angleRad), 0., Math.cos(angleRad), 0. }, { 0., 0., 0., 1. } });
 			// apply affine transform and retrieve bounded view
 			IntervalView<FloatType> rotated = affineBoundingBox(deconvolved, affineRot,
 					new NLinearInterpolatorFactory<>());
-			// Redefine coordinate system so that the image can be displayed despite the possible negative Interval
+			// Redefine coordinate system so that the image can be displayed
+			// despite the possible negative Interval
 			// This is necessary because of a bug????
 			result = Views.zeroMin(rotated);
-			
+
 		} catch (IOException e) {
 			// TODO Auto-generated catch block
 			e.printStackTrace();
@@ -114,49 +114,51 @@ public class LLSPreprocess<T extends RealType<T>> implements Command {
 
 	}
 
-	
 	/**
-	 * The function performs an arbitrary affine transform for an arbitrary number of dimensions.
-	 * The resulting view is automatically bounded
+	 * The function performs an arbitrary affine transform for an arbitrary
+	 * number of dimensions. The resulting view is automatically bounded
 	 * 
-	 * @param image input image
-	 * @param affine defines the transformation
-	 * @param interpolator defines the type of interpolation
+	 * @param image
+	 *            input image
+	 * @param affine
+	 *            defines the transformation
+	 * @param interpolator
+	 *            defines the type of interpolation
 	 * 
 	 * @return the transformed data defined on a View with bounded source
 	 */
 	private <K extends RealType<K>> IntervalView<K> affineBoundingBox(final RandomAccessibleInterval<K> image,
 			final AffineGet affine, InterpolatorFactory<K, RandomAccessible<K>> interpolator) {
-		
+
 		// extend with zeros
 		final RealRandomAccessible<K> field = Views.interpolate(Views.extendZero(image), interpolator);
-		
+
 		// transform the data
 		final AffineRandomAccessible<K, AffineGet> sheared = RealViews.affine(field, affine);
-		
+
 		int numDims = sheared.numDimensions();
-		
+
 		// to hold the bounds of the transformed data
 		long[] min = new long[numDims];
 		long[] max = new long[numDims];
 		Arrays.fill(min, Long.MAX_VALUE);
 		Arrays.fill(max, Long.MIN_VALUE);
-		
+
 		// to hold the corners of the dataset before and after transformation
 		final double[] source = new double[numDims];
 		double[] target = new double[numDims];
-		
+
 		// dataset dimensions
 		final long[] dims = new long[numDims];
 		image.dimensions(dims);
-		
-		// for calculating the corder coordinates
+
+		// for calculating the corner coordinates
 		final long[] normDims = new long[numDims];
 		Arrays.fill(normDims, 2);
-		
+
 		// to hold unnormalised coordinates, eg [1, 0, 0] or [1, 1, 1]
 		final long[] normPos = new long[numDims];
-		
+
 		// loop over corners, there are 2^(numDimensions)
 		for (int i = 0; i < Math.pow(2, numDims); i++) {
 			// calculate unnormalised coordinates
@@ -166,8 +168,8 @@ public class LLSPreprocess<T extends RealType<T>> implements Command {
 				source[d] = dims[d] * normPos[d];
 			// apply affine transform to corner
 			affine.apply(source, target);
-			
-			// if corner is either current extremal value in any dimension update bounds
+
+			// if corner is extremal value in any dimension update bounds
 			for (int d = 0; d < min.length; d++) {
 				if (target[d] < min[d])
 					min[d] = (long) Math.floor(target[d]);
@@ -179,7 +181,7 @@ public class LLSPreprocess<T extends RealType<T>> implements Command {
 		}
 		// create interval from extremal values
 		FinalInterval bounds = new FinalInterval(min, max);
-		
+
 		// return View with bounded source
 		return Views.interval(sheared, bounds);
 
@@ -200,9 +202,9 @@ public class LLSPreprocess<T extends RealType<T>> implements Command {
 
 		// load example dataset
 		Dataset dataset = (Dataset) ij.io().open("testStack.tif");
-		
+
 		// crop the dataset so it works on my laptop. This is a bit messy...
-		FinalInterval interval = FinalInterval.createMinSize(0, 0, 0, dataset.dimension(0), 400, 30);
+		FinalInterval interval = FinalInterval.createMinSize(0, 0, 0, dataset.dimension(0), 400, 100);
 		RandomAccessibleInterval<ShortType> croppedAcceesible = (RandomAccessibleInterval<ShortType>) ij.op()
 				.run("crop", dataset, interval, true);
 		dataset = null;
@@ -213,7 +215,5 @@ public class LLSPreprocess<T extends RealType<T>> implements Command {
 		ij.command().run(LLSPreprocess.class, true);
 
 	}
-	
-
 
 }
