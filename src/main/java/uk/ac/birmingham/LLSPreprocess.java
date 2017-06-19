@@ -34,8 +34,7 @@ import net.imglib2.view.IntervalView;
 import net.imglib2.view.Views;
 
 /**
- * This is a minimal ImageJ command implementing a difference of Gaussian
- * filter.
+ * This is a ImageJ command for preprocessing of lattice light sheet datasets
  */
 
 @Plugin(type = Command.class, menuPath = "Plugins>LLS preprocess")
