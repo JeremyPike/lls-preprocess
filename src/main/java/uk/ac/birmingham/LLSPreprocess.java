@@ -1,10 +1,13 @@
 
 package uk.ac.birmingham;
 
+import java.io.File;
+import java.io.IOException;
 import java.util.Arrays;
 
 import org.scijava.ItemIO;
 import org.scijava.command.Command;
+import org.scijava.io.IOService;
 import org.scijava.plugin.Parameter;
 import org.scijava.plugin.Plugin;
 import org.scijava.ui.UIService;
@@ -20,13 +23,12 @@ import net.imglib2.RealRandomAccessible;
 import net.imglib2.img.Img;
 import net.imglib2.interpolation.InterpolatorFactory;
 import net.imglib2.interpolation.randomaccess.NLinearInterpolatorFactory;
-import net.imglib2.outofbounds.OutOfBoundsMirrorFactory;
-import net.imglib2.outofbounds.OutOfBoundsMirrorFactory.Boundary;
 import net.imglib2.realtransform.AffineGet;
 import net.imglib2.realtransform.AffineRandomAccessible;
 import net.imglib2.realtransform.AffineTransform3D;
 import net.imglib2.realtransform.RealViews;
 import net.imglib2.type.numeric.RealType;
+import net.imglib2.type.numeric.integer.ShortType;
 import net.imglib2.type.numeric.real.FloatType;
 import net.imglib2.util.IntervalIndexer;
 import net.imglib2.view.IntervalView;
@@ -47,13 +49,19 @@ public class LLSPreprocess<T extends RealType<T>> implements Command {
 	private UIService uiService;
 
 	@Parameter
+	private IOService ioService;
+
+	@Parameter
 	private OpService opService;
 
 	@Parameter
 	private DatasetService datasetService;
 
+	@Parameter(label = "Select the image file for the PSF ", persist = true, style = "FILE")
+	private File psfFile;
+
 	@Parameter(type = ItemIO.OUTPUT)
-	private IntervalView<T> bounded;
+	private IntervalView<FloatType> result;
 
 	@Override
 	public void run() {
@@ -62,26 +70,46 @@ public class LLSPreprocess<T extends RealType<T>> implements Command {
 		// shear the image
 		final AffineTransform3D affine = new AffineTransform3D();
 		// final AffineTransform2D affine = new AffineTransform2D();
-		affine.set(new double[][] { { 1., 0., 100., 0. }, { 0., 1., 0., 0. }, { 0., 0., 1., 0. }, { 0., 0., 0., 1. } });
+		affine.set(new double[][] { { 1., 0., 1., 0. }, { 0., 1., 0., 0. }, { 0., 0., 1., 0. }, { 0., 0., 0., 1. } });
 		// affine.set(new double[][] { { 1., 1., 0.}, { 0., 1., 0.}, { 0., 0.,
 		// 1.} });
 
-		bounded = affineBoundingBox(image, affine, new NLinearInterpolatorFactory<>());
-		
-		//long[] borderSize = new long[bounded.numDimensions()];
-		//Arrays.fill(borderSize, 2);
-		
-		//RandomAccessibleInterval<FloatType> deconvolved = opService.deconvolve().richardsonLucy(bounded, bounded, borderSize, new OutOfBoundsMirrorFactory<T, RandomAccessibleInterval<T>>(Boundary.DOUBLE), new OutOfBoundsMirrorFactory<T, RandomAccessibleInterval<T>>(Boundary.DOUBLE), new FloatType(), fftType, maxIterations, nonCirculant, accelerate)
-		//opService.deconvolve().richardsonLucy(bounded, bounded, 2);
-		
+		IntervalView<T> bounded = affineBoundingBox(image, affine, new NLinearInterpolatorFactory<>());
+		// long[] borderSize = new long[bounded.numDimensions()];
+		// Arrays.fill(borderSize, 2);
+
+		try {
+			Img<T> psf = (Img<T>) ioService.open(psfFile.getAbsolutePath());
+			uiService.show(psf);
+
+			// deconvolved = opService.deconvolve().richardsonLucy(bounded, psf,
+			// 5);
+			Img<FloatType> boundedFloat = opService.convert().float32(bounded);
+			Img<FloatType> psfFloat = opService.convert().float32(psf);
+			RandomAccessibleInterval<FloatType> deconvolved = (RandomAccessibleInterval<FloatType>) opService
+					.run("richardsonLucy", boundedFloat, psfFloat, 1);
+			uiService.show(deconvolved);
+
+			final AffineTransform3D affineRot = new AffineTransform3D();
+			affineRot.set(new double[][] { { 0.8660254038, 0., 0.5, 0. }, { 0., 1., 0., 0. },
+					{ -0.5, 0., 0.8660254038, 0. }, { 0., 0., 0., 1. } });
+			IntervalView<FloatType> rotated = affineBoundingBox(deconvolved, affineRot,
+					new NLinearInterpolatorFactory<>());
+			result = Views.zeroMin(rotated);
+			// uiService.show(rotated);
+
+		} catch (IOException e) {
+			// TODO Auto-generated catch block
+			e.printStackTrace();
+		}
+
 	}
 
-	private IntervalView<T> affineBoundingBox(final Img<T> image, final AffineGet affine,
-			InterpolatorFactory<T, RandomAccessible<T>> interpolator) {
+	private <K extends RealType<K>> IntervalView<K> affineBoundingBox(final RandomAccessibleInterval<K> image,
+			final AffineGet affine, InterpolatorFactory<K, RandomAccessible<K>> interpolator) {
 
-		
-		final RealRandomAccessible<T> field = Views.interpolate(Views.extendZero(image), interpolator);
-		final AffineRandomAccessible<T, AffineGet> sheared = RealViews.affine(field, affine);
+		final RealRandomAccessible<K> field = Views.interpolate(Views.extendZero(image), interpolator);
+		final AffineRandomAccessible<K, AffineGet> sheared = RealViews.affine(field, affine);
 		int numDims = sheared.numDimensions();
 		long[] min = new long[numDims];
 		long[] max = new long[numDims];
@@ -113,8 +141,9 @@ public class LLSPreprocess<T extends RealType<T>> implements Command {
 
 			}
 		}
-
-	
+		for (int d = 0; d < min.length; d++) {
+			System.out.println(d + " min:" + min[d] + " max:" + max[d]);
+		}
 		FinalInterval bounds = new FinalInterval(min, max);
 		return Views.interval(sheared, bounds);
 
@@ -134,10 +163,14 @@ public class LLSPreprocess<T extends RealType<T>> implements Command {
 		ij.ui().showUI();
 
 		// load example dataset
-		final Dataset dataset = ij.scifio().datasetIO().open("http://imagej.net/images/FluorescentCells.jpg");
+		Dataset dataset = (Dataset) ij.io().open("testStack.tif");
 
+		FinalInterval interval = FinalInterval.createMinSize(0, 0, 0, dataset.dimension(0), 400, 30);
+		RandomAccessibleInterval<ShortType> croppedAcceesible = (RandomAccessibleInterval<ShortType>) ij.op()
+				.run("crop", dataset, interval, true);
+		dataset = null;
 		// show the image
-		ij.ui().show(dataset);
+		ij.ui().show(croppedAcceesible);
 
 		// invoke the plugin
 		ij.command().run(LLSPreprocess.class, true);
