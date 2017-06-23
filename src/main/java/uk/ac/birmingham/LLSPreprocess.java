@@ -1,16 +1,12 @@
 
 package uk.ac.birmingham;
 
-import java.io.File;
-import java.io.IOException;
 import java.util.Arrays;
 
 import org.scijava.ItemIO;
 import org.scijava.command.Command;
-import org.scijava.io.IOService;
 import org.scijava.plugin.Parameter;
 import org.scijava.plugin.Plugin;
-import org.scijava.ui.UIService;
 
 import net.imagej.Dataset;
 import net.imagej.ImageJ;
@@ -37,23 +33,26 @@ import net.imglib2.view.Views;
  * This is a ImageJ command for preprocessing of lattice light sheet datasets
  */
 
-@Plugin(type = Command.class, menuPath = "Plugins>LLS preprocess")
+@Plugin(type = Command.class, headless = true, menuPath = "Plugins>LLS preprocess")
 public class LLSPreprocess<T extends RealType<T>> implements Command {
-
-	@Parameter
-	private Dataset currentData;
-
-	@Parameter
-	private UIService uiService;
-
-	@Parameter
-	private IOService ioService;
 
 	@Parameter
 	private OpService opService;
 
-	@Parameter(label = "Select the image file for the PSF ", persist = true, style = "FILE")
-	private File psfFile;
+	@Parameter
+	private Img<T> image;
+
+	@Parameter
+	private Img<T> psf;
+
+	@Parameter(label = "Do you want to deskew", persist = true)
+	private boolean deskew = true;
+
+	@Parameter(label = "Do you want to deconvolve", persist = true)
+	private boolean deconvolve = true;
+
+	@Parameter(label = "Do you want to rotate", persist = true)
+	private boolean rotate = true;
 
 	@Parameter(label = "Define the shear for each slice (pixels): ", persist = false, min = "0.", max = "100.")
 	private double shearPix = 1.;
@@ -65,51 +64,60 @@ public class LLSPreprocess<T extends RealType<T>> implements Command {
 	private int maxItDecon = 1;
 
 	@Parameter(type = ItemIO.OUTPUT)
-	private IntervalView<FloatType> result;
+	private Img<FloatType> output;
+
+
 
 	@Override
 	public void run() {
-		final Img<T> image = (Img<T>) currentData.getImgPlus();
+		long[] dims = new long[image.numDimensions()];
+		image.dimensions(dims);
+		IntervalView<T> deskewed;
+		if (deskew) {
+			// create affine transform for shear
+			final AffineTransform3D affineShear = new AffineTransform3D();
+			affineShear.set(new double[][] { { 1., 0., shearPix, 0. }, { 0., 1., 0., 0. }, { 0., 0., 1., 0. },
+					{ 0., 0., 0., 1. } });
 
-		// create affine transform for shear
-		final AffineTransform3D affineShear = new AffineTransform3D();
-		affineShear.set(new double[][] { { 1., 0., shearPix, 0. }, { 0., 1., 0., 0. }, { 0., 0., 1., 0. },
-				{ 0., 0., 0., 1. } });
+			// apply affine transform and retrieve bounded view
+			deskewed = affineBoundingBox(image, affineShear, new NLinearInterpolatorFactory<>());
+		} else {
+			deskewed = new IntervalView<T>(image, new FinalInterval(dims));
+		}
 
-		// apply affine transform and retrieve bounded view
-		IntervalView<T> deskewed = affineBoundingBox(image, affineShear, new NLinearInterpolatorFactory<>());
-
-		try {
-			// open the psf stack
-			Img<T> psf = (Img<T>) ioService.open(psfFile.getAbsolutePath());
-
-			// convert both deskewed View and psf to Float
-			// this seems to be needed to get the deconvolution op to work????
-			Img<FloatType> deskewedFloat = opService.convert().float32(deskewed);
+		// convert both deskewed View and psf to Float
+		// this seems to be needed to get the deconvolution op to work????
+		final Img<FloatType> deskewedFloat = opService.convert().float32(deskewed);
+		final RandomAccessibleInterval<FloatType> deconvolved;
+		if (deconvolve) {
 			Img<FloatType> psfFloat = opService.convert().float32(psf);
 
 			// deconvolve with standard RL algorithm
-			RandomAccessibleInterval<FloatType> deconvolved = (RandomAccessibleInterval<FloatType>) opService
-					.run("richardsonLucy", deskewedFloat, psfFloat, maxItDecon);
+			deconvolved = (RandomAccessibleInterval<FloatType>) opService.run("richardsonLucy", deskewedFloat, psfFloat,
+					maxItDecon);
+		} else {
+			deconvolved = deskewedFloat;
+		}
 
+		if (rotate) {
 			// convert rotation angle to radians
 			final double angleRad = Math.toRadians(angleDegrees);
-
 			// create affine transform for rotation
 			final AffineTransform3D affineRot = new AffineTransform3D();
 			affineRot.set(new double[][] { { Math.cos(angleRad), 0., Math.sin(angleRad), 0. }, { 0., 1., 0., 0. },
 					{ -1 * Math.sin(angleRad), 0., Math.cos(angleRad), 0. }, { 0., 0., 0., 1. } });
 			// apply affine transform and retrieve bounded view
-			IntervalView<FloatType> rotated = affineBoundingBox(deconvolved, affineRot,
+			final IntervalView<FloatType> rotated = affineBoundingBox(deconvolved, affineRot,
 					new NLinearInterpolatorFactory<>());
 			// Redefine coordinate system so that the image can be displayed
 			// despite the possible negative Interval
 			// This is necessary because of a bug????
-			result = Views.zeroMin(rotated);
-
-		} catch (IOException e) {
-			// TODO Auto-generated catch block
-			e.printStackTrace();
+			 IntervalView<FloatType> rotatedZero = Views.zeroMin(rotated);
+			output = opService.create().img((RandomAccessibleInterval<FloatType>) rotatedZero, new FloatType());
+			opService.copy().rai(output, rotatedZero);
+		} else {
+			output = opService.create().img((RandomAccessibleInterval<FloatType>) deconvolved, new FloatType());
+			opService.copy().rai(output, deconvolved);
 		}
 
 	}
@@ -210,7 +218,9 @@ public class LLSPreprocess<T extends RealType<T>> implements Command {
 		dataset = null;
 		// show the cropped image
 		ij.ui().show(croppedAcceesible);
-
+		Dataset psf = (Dataset) ij.io().open("testpsf.tif");
+		ij.ui().show(psf);
+		// ij.ui().show(croppedAcceesible);
 		// invoke the plugin
 		ij.command().run(LLSPreprocess.class, true);
 
